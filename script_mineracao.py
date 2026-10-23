@@ -1,12 +1,13 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
+import os
+# Prevenção de vazamento de memória no Windows
+os.environ["OMP_NUM_THREADS"] = "1"
 
-from sklearn.preprocessing import StandardScaler
+import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score
 
-# Tentar importar mlxtend para regras de associação
 try:
     from mlxtend.frequent_patterns import apriori, association_rules
     MLXTEND_DISPONIVEL = True
@@ -14,82 +15,93 @@ except ImportError:
     MLXTEND_DISPONIVEL = False
 
 # ==============================================================================
-# ETAPA 1: LEITURA DOS DADOS
+# 1. LEITURA E PRÉ-PROCESSAMENTO (PANDAS & STANDARDSCALER)
 # ==============================================================================
-print("--- ETAPA 1: Carregando os Dados ---")
+print("--- 1. Carregando e Padronizando Dados do IBGE ---")
 df = pd.read_csv('ibge.csv')
 
-print(f"Total de registos: {df.shape[0]} estados")
-print("\nPrimeiras linhas:")
-print(df.head())
-
-# ==============================================================================
-# ETAPA 2: PRÉ-PROCESSAMENTO E PADRONIZAÇÃO (Z-SCORE)
-# ==============================================================================
-print("\n--- ETAPA 2: Pré-processamento dos Dados ---")
-
 atributos = ['Industria_Geral', 'Bens_Consumo', 'Bens_Capital', 'Intermediarios']
-X = df[atributos]
+X = df[atributos].values
 
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
 # ==============================================================================
-# ETAPA 3: CÁLCULO DO MELHOR K VIA COEFICIENTE DE SILHUETA
+# 2. AVALIAÇÃO DE K: MÉTODO DO COTOVELO (INÉRCIA) E COEFICIENTE DE SILHUETA
 # ==============================================================================
-print("\n--- ETAPA 3: Avaliação de Silhueta para Encontrar K Ideal ---")
+inerciais = []
+silhuetas = []
+K = range(2, 11)
 
-silhuetas = {}
-for k in range(2, 9):
-    kmeans_temp = KMeans(n_clusters=k, random_state=42, n_init=10)
-    rotulos = kmeans_temp.fit_predict(X_scaled)
-    score = silhouette_score(X_scaled, rotulos)
-    silhuetas[k] = score
-    print(f"K = {k}: Coeficiente de Silhueta = {score:.4f}")
+print("\n--- Testando K de 2 a 10 ---")
+for k in K:
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    labels = kmeans.fit_predict(X_scaled)
+    
+    inerciais.append(kmeans.inertia_)
+    score = silhouette_score(X_scaled, labels)
+    silhuetas.append(score)
+    
+    print(f"K={k} | Inércia (Cotovelo): {kmeans.inertia_:.2f} | Silhueta: {score:.4f}")
 
-melhor_k = max(silhuetas, key=silhuetas.get)
-print(f"\n=> O valor ideal de K baseado na maior Silhueta é K = {melhor_k}")
+# Gráficos Comparativos: Cotovelo vs Silhueta
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+# Gráfico do Cotovelo
+ax1.plot(K, inerciais, marker='o', color='b', linewidth=2)
+ax1.set_xlabel('Número de Clusters (K)')
+ax1.set_ylabel('Inércia / WCSS')
+ax1.set_title('Método do Cotovelo (Elbow Method)')
+ax1.grid(True, linestyle='--')
+
+# Gráfico da Silhueta
+ax2.plot(K, silhuetas, marker='o', color='g', linewidth=2)
+ax2.set_xlabel('Número de Clusters (K)')
+ax2.set_ylabel('Coeficiente de Silhueta')
+ax2.set_title('Coeficiente de Silhueta por K')
+ax2.grid(True, linestyle='--')
+
+plt.tight_layout()
+plt.show()
+
+# Seleção automática do melhor K pela Silhueta
+best_k = K[silhuetas.index(max(silhuetas))]
+print(f"\n=> Número ótimo de clusters selecionado: K={best_k}")
 
 # ==============================================================================
-# ETAPA 4: APLICAÇÃO DO ALGORITMO K-MEANS
+# 3. K-MEANS FINAL E PERFIL DOS GRUPOS
 # ==============================================================================
-print(f"\n--- ETAPA 4: Aplicação do K-Means com K={melhor_k} ---")
+kmeans_final = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+df['Cluster'] = kmeans_final.fit_predict(X_scaled)
 
-kmeans = KMeans(n_clusters=melhor_k, random_state=42, n_init=10)
-df['Cluster'] = kmeans.fit_predict(X_scaled)
-
-# ==============================================================================
-# ETAPA 5: APRESENTAÇÃO DOS GRUPOS ENCONTRADOS
-# ==============================================================================
-print("\n--- ETAPA 5: Perfil dos Grupos Encontrados ---")
-
-medias_cluster = df.groupby('Cluster')[atributos].mean()
-print("\nMédia das Variáveis por Cluster:")
-print(medias_cluster)
+print("\nMédia dos Atributos por Cluster:")
+print(df.groupby('Cluster')[atributos].mean())
 
 print("\nEstados pertencentes a cada Grupo:")
-for c in range(melhor_k):
-    estados_grupo = df[df['Cluster'] == c]['Estado'].tolist()
-    print(f"Cluster {c} ({len(estados_grupo)} estados): {', '.join(sorted(estados_grupo))}")
+for c in range(best_k):
+    estados = df[df['Cluster'] == c]['Estado'].tolist()
+    print(f"Cluster {c} ({len(estados)} estados): {', '.join(sorted(estados))}")
 
 # ==============================================================================
-# ETAPA 6: REGRAS DE ASSOCIAÇÃO
+# 4. REGRAS DE ASSOCIAÇÃO (APRIORI)
 # ==============================================================================
-print("\n--- ETAPA 6: Regras de Associação ---")
-
-df_binario = pd.DataFrame()
+print("\n--- Regras de Associação ---")
+df_disc = pd.DataFrame()
 for col in atributos:
-    df_binario[f'{col}_Alto'] = df[col] >= 100.0
+    df_disc[f'{col}_Alto'] = df[col] >= 100.0
+
+df_disc = df_disc.astype(str)
+df_encoded = pd.get_dummies(df_disc)
 
 if MLXTEND_DISPONIVEL:
-    itemsets_frequentes = apriori(df_binario, min_support=0.4, use_colnames=True)
-    regras = association_rules(itemsets_frequentes, metric="confidence", min_threshold=0.8)
-    regras_ordenadas = regras.sort_values(by=['lift', 'confidence'], ascending=False)
+    frequent_itemsets = apriori(df_encoded, min_support=0.4, use_colnames=True)
+    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.8)
     
-    print("\nPrincipais Regras de Associação Encontradas:")
-    for idx, row in regras_ordenadas.head(5).iterrows():
-        ant = list(row['antecedents'])
-        cons = list(row['consequents'])
-        print(f"SE {ant} ENTÃO {cons} | Suporte: {row['support']:.2f} | Confiança: {row['confidence']:.2f} | Lift: {row['lift']:.2f}")
-else:
-    print("\n[Aviso] Instale a biblioteca 'mlxtend' para ver as regras de associação no terminal.")
+    rules_true = rules[rules['consequents'].astype(str).str.contains('True')]
+    
+    print("\n🔹 Regras com Maior Confiança e Lift:\n")
+    for idx, row in rules_true.head(5).iterrows():
+        antecedente = ', '.join(list(row['antecedents']))
+        consequente = ', '.join(list(row['consequents']))
+        print(f"➡️ SE ({antecedente}) ENTÃO ({consequente})")
+        print(f"   Suporte: {row['support']:.2f} | Confiança: {row['confidence']:.2f} | Lift: {row['lift']:.2f}\n")
